@@ -3,10 +3,166 @@ title: 'Homework 6: Linear Models'
 author: "Jessica Lavery"
 date: "Due 11/25/2019"
 output: github_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
 library(tidyverse)
+library(kableExtra)
+library(patchwork)
+
+# set seed for cross validation and bootstrapping so that results are reproducible 
+set.seed(1123)
+
+# set theme for ggplot
+theme_set(theme_bw() + theme(legend.position = "bottom"))
 ```
+
+# Problem 1
+
+```{r}
+# read in and tidy the data
+raw_data <- read_csv("./data/birthweight.csv") %>% 
+  janitor::clean_names() 
+
+tidy_data <- raw_data %>% 
+  mutate(babysex = factor(case_when(babysex == 1 ~ "Male",
+                             babysex == 2 ~ "Female"), levels = c("Male", "Female")),
+         father_race = fct_reorder(as_factor(case_when(frace == 1 ~ "White",
+                           frace == 2 ~ "Black",
+                           frace == 3 ~ "Asian",
+                           frace == 4 ~ "Puerto Rican",
+                           frace == 8 ~ "Other",
+                           TRUE ~ as.character(NA))),  frace),
+         mother_race = fct_reorder(as_factor(case_when(frace == 1 ~ "White",
+                           frace == 2 ~ "Black",
+                           frace == 3 ~ "Asian",
+                           frace == 4 ~ "Puerto Rican",
+                           frace == 8 ~ "Other",
+                           TRUE ~ as.character(NA))),  mrace))
+```
+
+Since we are going to be fitting a model we will start by looking at a summary of the data. In particular we will look at the amount of missingness and the levels of each variable. 
+
+```{r}
+skimr::skim(tidy_data)
+```
+
+Before fitting a linear model we will plot the distribution of birthweight to ensure that a linear model is appropriate. Based on the below histogram, the data are normally distributed and a linear model is appropriate for the outcome of birthweight. 
+
+```{r}
+# plot the raw birthweight data
+ggplot(data = tidy_data, aes(x = bwt)) +
+  geom_histogram()
+```
+
+The following linear modoel is based on pre-specification of the relevant covariates a priori. 
+
+```{r}
+tidy_data %>% 
+  select_if(is.factor) %>% 
+  map(table, useNA = "always")
+```
+
+Variables that were selected were variables that are hypothesized to be related to birthweight. Binary or categorical covariates with small cell sizes were not included in the model since they would advsersely affect model fit. Examples of such variables that were considered but not included due to low cell counts were: `malform` (n=`r nrow(tidy_data %>% filter(malform == 1))`), `pnumsga` (n=`r nrow(tidy_data %>% filter(pnumsga != 0))`).
+
+```{r}
+# propose a linear model for the data
+mdl_bwt <- lm(bwt ~ babysex + gaweeks, data = tidy_data)
+#+  delwt +  + ppbmi + wtgain
+broom::tidy(mdl_bwt)
+```
+
+## Residuals vs predicted values
+
+```{r}
+tidy_data %>% 
+  modelr::add_residuals(mdl_bwt) %>% 
+  modelr::add_predictions(mdl_bwt) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point() + 
+  geom_smooth(method = "loess", se = TRUE) + 
+  labs(title = "Residuals vs predicted values for linear model of birthweight",
+       caption = "Model adjusted for: baby's sex, mother's delivery weight, gestational age (weeks), pre-pregnancy BMI, and weight gain.",
+       x = "Predicted values",
+       y = "Residuals")
+```
+
+## Model comparisons
+
+```{r}
+alt_model1 <- lm(bwt ~ blength + gaweeks, data = tidy_data)
+
+alt_model2 <- lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex, data = tidy_data)
+```
+
+# Problem 2
+
+```{r}
+# read in raw data
+weather_df <- rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"),
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(name = recode(id, USW00094728 = "CentralPark_NY"),
+         tmin = tmin / 10,
+         tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+## Bootstrap
+
+```{r}
+# 1. select bootstrap samples
+bootstrap_samples <- weather_df %>% 
+  modelr::bootstrap(n = 1000)
+
+# 2. on each bootstrapped sample, run a linear model and extract relevant information 
+bootstrap_models <- bootstrap_samples %>% 
+  mutate(models = map(strap, ~lm(tmax ~ tmin, data = .x)),
+         results = map(models, broom::tidy),
+         r2 = map(models, broom::glance)) %>% 
+  select(-strap, -models) %>%
+  unnest(c(results, r2), names_repair = "universal") %>% 
+  select(.id, term, estimate, r.squared) %>% 
+  pivot_wider(id_cols = c(.id, r.squared),
+              names_from = term,
+              values_from = estimate) %>% 
+  rename(beta0 = `(Intercept)`, beta1 = "tmin") %>% 
+  mutate(logb0b1 = log(beta0 * beta1)) 
+
+head(bootstrap_models)
+
+# 3. plot the distribution of the estimates of interest
+dist_r2 <- ggplot(data = bootstrap_models, aes(x = r.squared)) + 
+  geom_histogram() +
+  labs(x = "R-squared",
+       y = "Count",
+       title = "Distribution of R-squared")
+
+dist_logb0b1 <- ggplot(data = bootstrap_models, aes(x = logb0b1)) + 
+  geom_histogram() +
+  labs(x = "Log(beta0 * beta1)",
+       y = "Count",
+       title = "Distribution of log(beta0 * beta1)")
+
+dist_r2 / dist_logb0b1
+
+#4. summarize bootstrapped reuslts
+bootstrap_summary <- bootstrap_models %>% 
+  summarize(r2_lower = round(quantile(r.squared, probs = 0.025), 2),
+         r2_upper = round(quantile(r.squared, probs = 0.975), 2),
+         logb0b1_lower = round(quantile(logb0b1, probs = 0.025), 2),
+         logb0b1_upper = round(quantile(logb0b1, probs = 0.975), 2)) 
+```
+
+The 95% CI for the r-squared value is (`r pull(bootstrap_summary, r2_lower)`, `r pull(bootstrap_summary, r2_upper)`).
+
+The 95% CI for log(b0 * b1) is (`r pull(bootstrap_summary, logb0b1_lower)`, `r pull(bootstrap_summary, logb0b1_upper)`).
+
+
+
