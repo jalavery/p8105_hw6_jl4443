@@ -57,12 +57,15 @@ Before fitting a linear model we will plot the distribution of birthweight to en
 ```{r}
 # plot the raw birthweight data
 ggplot(data = tidy_data, aes(x = bwt)) +
-  geom_histogram()
+  geom_histogram() +
+  labs(x = "Birthweight (grams)",
+       y = "Count",
+       title = "Distribution of birthweight")
 ```
 
 
 ```{r, include = FALSE}
-# output suppressed
+# look at levels of factor variables (output suppressed)
 tidy_data %>% 
   select_if(is.factor) %>% 
   map(table, useNA = "always")
@@ -72,9 +75,11 @@ The following linear model is based on pre-specification of the relevant covaria
 
 ```{r}
 # propose a linear model for the data
-mdl_bwt <- lm(bwt ~ babysex + gaweeks + blength, data = tidy_data)
+mdl_bwt <- lm(bwt ~ babysex + gaweeks + blength + bhead + smoken, data = tidy_data)
 
 broom::tidy(mdl_bwt) %>% 
+  mutate(p_value = format.pval(p.value, digits = 2, eps = 0.001)) %>% 
+  select(-p.value) %>% 
   kable()
 ```
 
@@ -90,12 +95,12 @@ tidy_data %>%
   geom_hline(yintercept = 0) + 
   # geom_smooth(method = "loess", se = TRUE) + 
   labs(title = "Residuals vs predicted values for linear model of birthweight",
-       caption = "Model adjusted for: baby's sex, mother's delivery weight, gestational age (weeks), pre-pregnancy BMI, and weight gain.",
+       caption = "Model adjusted for: baby's sex, gestational age, baby's length (cm), baby's head circumference, and number of cigarettes per day during pregnancy.",
        x = "Predicted values",
        y = "Residuals")
 ```
 
-There is one patient whose predicted value is less than 0, but this patient is a clear outlier in the data. For the majority of the data except for the tails, the residuals are dispersed evenly on average across predicted values.
+There is are three babies whose predicted birthweight is less than 0, but they are clear outliers in the data. For the majority of the data, the residuals are generally evenly dispersed across the predicted values.
 
 ## Model comparisons
 
@@ -107,7 +112,7 @@ cv <- crossv_mc(tidy_data, 100) %>%
   mutate(train = map(train, as_tibble),
     test = map(test, as_tibble)) %>% 
   # run each of the models
-  mutate(primary_model  = map(train, ~lm(bwt ~ babysex + gaweeks, data = .x)),
+  mutate(primary_model  = map(train, ~lm(bwt ~ babysex + gaweeks + blength + bhead + smoken, data = .x)),
          alt_model1  = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
          alt_model2  = map(train, ~lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex, data = .x))) %>% 
   # pull out root mses
@@ -134,6 +139,8 @@ cv %>%
        caption = "Alternative model 1 adjusted for length at birth and gestational age; Alternative model 2 adjusted for head circumference, length, sex, and all interactions.")
 ```
 
+The first alternative model (adjusted only for length at birth and gestational age) had the highest RMSE, indicating poorest predictive value. THe primary model (adjusted for baby's sex, gestational age, baby's length (cm), baby's head circumference, and number of cigarettes per day during pregnancy) and the second alternative model (adjusted for head circumference, length, sex, and all interactions) were comparable in terms of their RMSE, with the primary model having slightly lower RMSE than the second alternative model. 
+
 # Problem 2
 
 ```{r}
@@ -154,7 +161,7 @@ weather_df <- rnoaa::meteo_pull_monitors(
 ```{r, message=FALSE}
 # 1. select bootstrap samples
 bootstrap_samples <- weather_df %>% 
-  modelr::bootstrap(n = 1000)
+  modelr::bootstrap(n = 5000)
 
 # 2. on each bootstrapped sample, run a linear model and extract relevant information 
 bootstrap_models <- bootstrap_samples %>% 
