@@ -13,6 +13,7 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(kableExtra)
 library(patchwork)
+library(modelr)
 
 # set seed for cross validation and bootstrapping so that results are reproducible 
 set.seed(1123)
@@ -51,7 +52,7 @@ Since we are going to be fitting a model we will start by looking at a summary o
 skimr::skim(tidy_data)
 ```
 
-Before fitting a linear model we will plot the distribution of birthweight to ensure that a linear model is appropriate. Based on the below histogram, the data are normally distributed and a linear model is appropriate for the outcome of birthweight. 
+Before fitting a linear model we will plot the distribution of birthweight to ensure that a linear model is appropriate. Based on the below histogram, the data are normally distributed with mean `r round(mean(pull(tidy_data, bwt)),0)` grams and a linear model is appropriate for the outcome of birthweight. 
 
 ```{r}
 # plot the raw birthweight data
@@ -59,44 +60,78 @@ ggplot(data = tidy_data, aes(x = bwt)) +
   geom_histogram()
 ```
 
-The following linear modoel is based on pre-specification of the relevant covariates a priori. 
 
-```{r}
+```{r, include = FALSE}
+# output suppressed
 tidy_data %>% 
   select_if(is.factor) %>% 
   map(table, useNA = "always")
 ```
 
-Variables that were selected were variables that are hypothesized to be related to birthweight. Binary or categorical covariates with small cell sizes were not included in the model since they would advsersely affect model fit. Examples of such variables that were considered but not included due to low cell counts were: `malform` (n=`r nrow(tidy_data %>% filter(malform == 1))`), `pnumsga` (n=`r nrow(tidy_data %>% filter(pnumsga != 0))`).
+The following linear model is based on pre-specification of the relevant covariates a priori, meaning tht variables included were variables that are hypothesized to be related to birthweight rather than model selection via data driven approach. Binary or categorical covariates with small cell sizes were not included in the model since they would advsersely affect model fit. Examples of such variables that were considered but not included due to low cell counts or fewer than two levels were: `malform` (n=`r nrow(tidy_data %>% filter(malform == 1))`), `pnumsga` (n=`r nrow(tidy_data %>% filter(pnumsga != 0))`).
 
 ```{r}
 # propose a linear model for the data
-mdl_bwt <- lm(bwt ~ babysex + gaweeks, data = tidy_data)
-#+  delwt +  + ppbmi + wtgain
-broom::tidy(mdl_bwt)
+mdl_bwt <- lm(bwt ~ babysex + gaweeks + blength, data = tidy_data)
+
+broom::tidy(mdl_bwt) %>% 
+  kable()
 ```
 
 ## Residuals vs predicted values
 
 ```{r}
 tidy_data %>% 
-  modelr::add_residuals(mdl_bwt) %>% 
-  modelr::add_predictions(mdl_bwt) %>% 
+  add_residuals(mdl_bwt) %>% 
+  add_predictions(mdl_bwt) %>% 
+  # filter(pred > 0) %>% 
   ggplot(aes(x = pred, y = resid)) + 
-  geom_point() + 
-  geom_smooth(method = "loess", se = TRUE) + 
+  geom_point(alpha = 0.6) + 
+  geom_hline(yintercept = 0) + 
+  # geom_smooth(method = "loess", se = TRUE) + 
   labs(title = "Residuals vs predicted values for linear model of birthweight",
        caption = "Model adjusted for: baby's sex, mother's delivery weight, gestational age (weeks), pre-pregnancy BMI, and weight gain.",
        x = "Predicted values",
        y = "Residuals")
 ```
 
+There is one patient whose predicted value is less than 0, but this patient is a clear outlier in the data. For the majority of the data except for the tails, the residuals are dispersed evenly on average across predicted values.
+
 ## Model comparisons
 
 ```{r}
-alt_model1 <- lm(bwt ~ blength + gaweeks, data = tidy_data)
+# cross-validate to get standard errors for alt_model1
+# generate test-training pairs for cross-validation
+cv <- crossv_mc(tidy_data, 100) %>% 
+  # format the cross validated datasets as tibbles
+  mutate(train = map(train, as_tibble),
+    test = map(test, as_tibble)) %>% 
+  # run each of the models
+  mutate(primary_model  = map(train, ~lm(bwt ~ babysex + gaweeks, data = .x)),
+         alt_model1  = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+         alt_model2  = map(train, ~lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex, data = .x))) %>% 
+  # pull out root mses
+  mutate(rmse_primary = map2_dbl(primary_model, test, ~rmse(model = .x, data = .y)),
+         rmse_alt1 = map2_dbl(alt_model1, test, ~rmse(model = .x, data = .y)),
+         rmse_alt2 = map2_dbl(alt_model2, test, ~rmse(model = .x, data = .y)))
 
-alt_model2 <- lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex, data = tidy_data)
+# use ggplot to assess model fit
+cv %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = case_when(model == "primary" ~ "Primary model",
+                           model == "alt1" ~ "Alternative model 1",
+                           model == "alt2" ~ "Alternative model 2"),
+         model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin() +
+  labs(title = "Birthweight model comparison",
+       x = "Model",
+       y = "Root mean squre error (RMSE)",
+       caption = "Alternative model 1 adjusted for length at birth and gestational age; Alternative model 2 adjusted for head circumference, length, sex, and all interactions.")
 ```
 
 # Problem 2
@@ -116,7 +151,7 @@ weather_df <- rnoaa::meteo_pull_monitors(
 
 ## Bootstrap
 
-```{r}
+```{r, message=FALSE}
 # 1. select bootstrap samples
 bootstrap_samples <- weather_df %>% 
   modelr::bootstrap(n = 1000)
@@ -154,15 +189,15 @@ dist_r2 / dist_logb0b1
 
 #4. summarize bootstrapped reuslts
 bootstrap_summary <- bootstrap_models %>% 
-  summarize(r2_lower = round(quantile(r.squared, probs = 0.025), 2),
+  summarize(r2_mean = round(mean(r.squared), 2),
+         r2_lower = round(quantile(r.squared, probs = 0.025), 2),
          r2_upper = round(quantile(r.squared, probs = 0.975), 2),
+         logb0b1_mean = round(mean(logb0b1), 2),
          logb0b1_lower = round(quantile(logb0b1, probs = 0.025), 2),
          logb0b1_upper = round(quantile(logb0b1, probs = 0.975), 2)) 
 ```
 
-The 95% CI for the r-squared value is (`r pull(bootstrap_summary, r2_lower)`, `r pull(bootstrap_summary, r2_upper)`).
+R-squared is approximately normally distributed with mean `r pull(bootstrap_summary, r2_mean)`. The 95% CI for the r-squared value is (`r pull(bootstrap_summary, r2_lower)`, `r pull(bootstrap_summary, r2_upper)`).
 
+Log(beta0*beta1) is also normally distributed with mean `r pull(bootstrap_summary, logb0b1_mean)`. 
 The 95% CI for log(b0 * b1) is (`r pull(bootstrap_summary, logb0b1_lower)`, `r pull(bootstrap_summary, logb0b1_upper)`).
-
-
-
